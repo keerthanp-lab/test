@@ -186,6 +186,37 @@ const Home: React.FC = () => {
     setShowAddMemberModal(false);
   };
 
+  const deleteGroup = () => {
+    if (!selectedGroup) return;
+    if (selectedGroup.createdBy !== userId) {
+      Alert.alert('Permission Denied', 'Only the group admin can delete this group.');
+      return;
+    }
+    Alert.alert(
+      'Delete Group',
+      `Delete "${selectedGroup.name}"? This will permanently remove all expenses in this group.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            // Delete all shared expenses in the group
+            const expSnap = await firestore()
+              .collection('shared_expenses')
+              .where('groupId', '==', selectedGroup.id)
+              .get();
+            const batch = firestore().batch();
+            expSnap.docs.forEach(doc => batch.delete(doc.ref));
+            batch.delete(firestore().collection('groups').doc(selectedGroup.id));
+            await batch.commit();
+            setSelectedGroupId(null);
+          },
+        },
+      ],
+    );
+  };
+
   // ─── Expense handlers ─────────────────────────────────────────────────────
 
   const openAddExpenseForm = () => {
@@ -643,7 +674,12 @@ const Home: React.FC = () => {
             <Text style={s.backBtnText}>&lsaquo; Back</Text>
           </TouchableOpacity>
           <Text style={s.topBarTitle} numberOfLines={1}>{selectedGroup.name}</Text>
-          <TouchableOpacity style={[s.topBarAction, { backgroundColor: Colors.secondary, marginRight: 6 }]} onPress={() => setShowAddMemberModal(true)}>
+          {selectedGroup.createdBy === userId && (
+            <TouchableOpacity style={[s.topBarAction, { backgroundColor: Colors.danger }]} onPress={deleteGroup}>
+              <Text style={s.topBarActionText}>Delete</Text>
+            </TouchableOpacity>
+          )}
+          <TouchableOpacity style={[s.topBarAction, { backgroundColor: Colors.secondary }]} onPress={() => setShowAddMemberModal(true)}>
             <Text style={s.topBarActionText}>+ Member</Text>
           </TouchableOpacity>
           <TouchableOpacity style={s.topBarAction} onPress={openAddExpenseForm}>

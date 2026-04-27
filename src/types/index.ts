@@ -7,7 +7,7 @@ export interface Group {
   updated_last: any;
 }
 
-export type SplitType = 'equal' | 'byAmount';
+export type SplitType = 'equal' | 'byAmount' | 'settlement';
 
 export interface ShareDetail {
   [email: string]: number;
