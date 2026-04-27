@@ -1,0 +1,7 @@
+# Archives
+src.zip
+*.zip
+
+# OS
+.DS_Store
+Thumbs.db
