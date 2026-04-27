@@ -45,6 +45,10 @@ const formatDisplayDate = (raw: any): string => {
   return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
 };
 
+const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const GROUP_START_YEAR = 2024;
+const GROUP_START_MONTH = 1;
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 const Home: React.FC = () => {
@@ -86,6 +90,11 @@ const Home: React.FC = () => {
   const [settlePayer, setSettlePayer] = useState('');
   const [settleRecipient, setSettleRecipient] = useState('');
   const [settleAmount, setSettleAmount] = useState('');
+
+  // ── Group detail view state ────────────────────────────────────────────────
+  const [groupTab, setGroupTab] = useState<'expenses' | 'summary'>('expenses');
+  const [groupMonth, setGroupMonth] = useState(() => new Date().getMonth() + 1);
+  const [groupYear, setGroupYear] = useState(() => new Date().getFullYear());
 
   // ─── Effects ──────────────────────────────────────────────────────────────
 
@@ -272,7 +281,7 @@ const Home: React.FC = () => {
     setEditingExpense(expense);
     setFormItemName(expense.itemName);
     setFormCost(String(expense.cost));
-    setFormDate(new Date(expense.date + 'T00:00:00'));
+    setFormDate(parseAnyDate(expense.date) ?? new Date());
     setFormSplitType(expense.splitType);
     // Reconstruct checked members from shares (non-zero entries)
     const checked = Object.entries(expense.shares)
@@ -381,6 +390,20 @@ const Home: React.FC = () => {
     await firestore().collection('groups').doc(selectedGroup!.id).update({ updated_last: now });
     setShowSettleModal(false);
     setSettleAmount('');
+  };
+
+  // ─── Group month navigation ───────────────────────────────────────────────
+
+  const prevGroupMonth = () => {
+    if (groupYear === GROUP_START_YEAR && groupMonth === GROUP_START_MONTH) return;
+    if (groupMonth === 1) { setGroupMonth(12); setGroupYear(y => y - 1); }
+    else setGroupMonth(m => m - 1);
+  };
+  const nextGroupMonth = () => {
+    const now = new Date();
+    if (groupYear === now.getFullYear() && groupMonth === now.getMonth() + 1) return;
+    if (groupMonth === 12) { setGroupMonth(1); setGroupYear(y => y + 1); }
+    else setGroupMonth(m => m + 1);
   };
 
   // ─── Modals ───────────────────────────────────────────────────────────────
@@ -722,10 +745,30 @@ const Home: React.FC = () => {
   const renderGroupDetail = () => {
     if (!selectedGroup) return null;
     const balances = computeBalances();
-    const totalExpenses = groupExpenses.reduce((s, e) => s + e.cost, 0);
+    const now = new Date();
+    const isAtGroupStart = groupYear === GROUP_START_YEAR && groupMonth === GROUP_START_MONTH;
+    const isAtGroupEnd = groupYear === now.getFullYear() && groupMonth === now.getMonth() + 1;
+
+    // Month-filtered expenses
+    const monthlyExpenses = groupExpenses.filter(e => {
+      const d = parseAnyDate(e.date);
+      if (!d) return true;
+      return d.getFullYear() === groupYear && d.getMonth() + 1 === groupMonth;
+    });
+    const regularExpenses = monthlyExpenses.filter(e => e.splitType !== 'settlement');
+    const settlementExpenses = monthlyExpenses.filter(e => e.splitType === 'settlement');
+    const monthlyRegularTotal = regularExpenses.reduce((sum, e) => sum + e.cost, 0);
+
+    // Per-member monthly share breakdown
+    const memberMonthlyShares = selectedGroup.members.map(email => ({
+      email,
+      totalShare: regularExpenses.reduce((sum, e) => sum + (e.shares[email] ?? 0), 0),
+      totalPaid: regularExpenses.filter(e => e.email === email).reduce((sum, e) => sum + e.cost, 0),
+    }));
 
     return (
       <View style={s.screen}>
+        {/* Top bar */}
         <View style={s.topBar}>
           <TouchableOpacity onPress={() => setSelectedGroupId(null)} style={s.backBtn}>
             <Text style={s.backBtnText}>&lsaquo; Back</Text>
@@ -745,10 +788,10 @@ const Home: React.FC = () => {
         </View>
 
         <ScrollView contentContainerStyle={s.detailContent}>
-          {/* Summary */}
+          {/* All-time summary card */}
           <View style={s.summaryCard}>
-            <Text style={s.summaryLabel}>Total Expenses</Text>
-            <Text style={s.summaryAmount}>{formatCurrency(totalExpenses)}</Text>
+            <Text style={s.summaryLabel}>Total Expenses (All Time)</Text>
+            <Text style={s.summaryAmount}>{formatCurrency(groupExpenses.reduce((sum, e) => sum + e.cost, 0))}</Text>
             <Text style={s.summaryMeta}>
               {`${selectedGroup.members.length} members · ${groupExpenses.length} expenses`}
             </Text>
@@ -757,7 +800,7 @@ const Home: React.FC = () => {
             </Text>
           </View>
 
-          {/* Balances */}
+          {/* Member Balances (all-time) */}
           <View style={s.sectionRow}>
             <Text style={s.sectionHeading}>Member Balances</Text>
             <TouchableOpacity style={s.settleBtn} onPress={openSettleModal}>
@@ -786,7 +829,7 @@ const Home: React.FC = () => {
                         ? `gets back ${formatCurrency(b.balance)}`
                         : b.balance < -0.005
                         ? `owes ${formatCurrency(b.balance)}`
-                        : `Settled ✓`}
+                        : 'Settled ✓'}
                     </Text>
                     <Text style={s.balanceSub}>
                       {`paid ${formatCurrency(b.totalPaid)} · share ${formatCurrency(b.totalOwed)}`}
@@ -805,36 +848,75 @@ const Home: React.FC = () => {
             )}
           </View>
 
-          {/* Expenses */}
-          <Text style={s.sectionHeading}>Expenses</Text>
-          {groupExpenses.length === 0 ? (
-            <Text style={s.noDataText}>No expenses yet. Tap "+ Add" to record one.</Text>
-          ) : (
-            groupExpenses.map(expense => (
-              <View key={expense.id} style={s.expenseCard}>
-                <View style={s.expenseTop}>
-                  <Text style={s.expenseName}>{expense.itemName}</Text>
-                  <Text style={s.expenseCost}>{formatCurrency(expense.cost)}</Text>
-                </View>
-                <Text style={s.expenseMeta}>
-                  {`${formatDisplayDate(expense.date)} · paid by ${getMemberName(expense.email)}`}
+          {/* ── Month navigator ── */}
+          <View style={s.monthNav}>
+            <TouchableOpacity
+              onPress={prevGroupMonth}
+              disabled={isAtGroupStart}
+              style={[s.monthNavArrow, isAtGroupStart && s.monthNavArrowDim]}>
+              <Text style={s.monthNavArrowText}>‹</Text>
+            </TouchableOpacity>
+            <Text style={s.monthNavLabel}>{MONTH_NAMES[groupMonth - 1]} {groupYear}</Text>
+            <TouchableOpacity
+              onPress={nextGroupMonth}
+              disabled={isAtGroupEnd}
+              style={[s.monthNavArrow, isAtGroupEnd && s.monthNavArrowDim]}>
+              <Text style={s.monthNavArrowText}>›</Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* Monthly total mini-row */}
+          <View style={s.monthlySummaryRow}>
+            <Text style={s.monthlySummaryLabel}>
+              {`${MONTH_NAMES[groupMonth - 1]} ${groupYear} expenses`}
+            </Text>
+            <Text style={s.monthlySummaryAmount}>{formatCurrency(monthlyRegularTotal)}</Text>
+          </View>
+
+          {/* ── Tab bar ── */}
+          <View style={s.tabBar}>
+            {(['expenses', 'summary'] as const).map(tab => (
+              <TouchableOpacity
+                key={tab}
+                style={[s.tabBtn, groupTab === tab && s.tabBtnActive]}
+                onPress={() => setGroupTab(tab)}
+                activeOpacity={0.8}>
+                <Text style={[s.tabBtnText, groupTab === tab && s.tabBtnTextActive]}>
+                  {tab === 'expenses' ? 'Expenses' : 'Summary'}
                 </Text>
-                <Text style={s.expenseSplitLabel}>
-                  {expense.splitType === 'equal' ? 'Split equally'
-                    : expense.splitType === 'settlement' ? 'Settlement'
-                    : 'Split by amount'}
-                </Text>
-                <View style={s.sharesRow}>
-                  {Object.entries(expense.shares)
-                    .filter(([, amount]) => amount > 0)
-                    .map(([email, amount]) => (
-                      <View key={email} style={s.shareChip}>
-                        <Text style={s.shareChipEmail}>{getMemberName(email)}</Text>
-                        <Text style={s.shareChipAmount}>{formatCurrency(amount)}</Text>
-                      </View>
-                    ))}
-                </View>
-                {expense.splitType !== 'settlement' && (
+              </TouchableOpacity>
+            ))}
+          </View>
+
+          {/* ── Expenses tab ── */}
+          {groupTab === 'expenses' && (
+            regularExpenses.length === 0 ? (
+              <Text style={s.noDataText}>
+                {`No expenses for ${MONTH_NAMES[groupMonth - 1]} ${groupYear}.`}
+              </Text>
+            ) : (
+              regularExpenses.map(expense => (
+                <View key={expense.id} style={s.expenseCard}>
+                  <View style={s.expenseTop}>
+                    <Text style={s.expenseName}>{expense.itemName}</Text>
+                    <Text style={s.expenseCost}>{formatCurrency(expense.cost)}</Text>
+                  </View>
+                  <Text style={s.expenseMeta}>
+                    {`${formatDisplayDate(expense.date)} · paid by ${getMemberName(expense.email)}`}
+                  </Text>
+                  <Text style={s.expenseSplitLabel}>
+                    {expense.splitType === 'equal' ? 'Split equally' : 'Split by amount'}
+                  </Text>
+                  <View style={s.sharesRow}>
+                    {Object.entries(expense.shares)
+                      .filter(([, amt]) => amt > 0)
+                      .map(([email, amt]) => (
+                        <View key={email} style={s.shareChip}>
+                          <Text style={s.shareChipEmail}>{getMemberName(email)}</Text>
+                          <Text style={s.shareChipAmount}>{formatCurrency(amt)}</Text>
+                        </View>
+                      ))}
+                  </View>
                   <View style={s.expenseActions}>
                     <TouchableOpacity style={s.editBtn} onPress={() => openEditExpenseForm(expense)}>
                       <Text style={s.editBtnText}>Edit</Text>
@@ -843,9 +925,79 @@ const Home: React.FC = () => {
                       <Text style={s.deleteBtnText}>Delete</Text>
                     </TouchableOpacity>
                   </View>
-                )}
-              </View>
-            ))
+                </View>
+              ))
+            )
+          )}
+
+          {/* ── Summary tab ── */}
+          {groupTab === 'summary' && (
+            <>
+              {regularExpenses.length === 0 && settlementExpenses.length === 0 ? (
+                <Text style={s.noDataText}>
+                  {`No data for ${MONTH_NAMES[groupMonth - 1]} ${groupYear}.`}
+                </Text>
+              ) : (
+                <>
+                  {/* Per-member monthly share breakdown */}
+                  <View style={s.memberSharesCard}>
+                    {memberMonthlyShares.map((ms, idx) => {
+                      const net = ms.totalPaid - ms.totalShare;
+                      return (
+                        <View
+                          key={ms.email}
+                          style={[s.memberShareRow, idx === memberMonthlyShares.length - 1 && s.memberShareRowLast]}>
+                          <View style={s.balanceAvatar}>
+                            <Text style={s.balanceAvatarText}>{shortEmail(ms.email).toUpperCase()}</Text>
+                          </View>
+                          <View style={s.balanceRight}>
+                            <Text style={s.balanceName} numberOfLines={1}>{getMemberName(ms.email)}</Text>
+                            <Text style={s.memberShareSub}>
+                              {`Paid ${formatCurrency(ms.totalPaid)} · Share ${formatCurrency(ms.totalShare)}`}
+                            </Text>
+                          </View>
+                          <Text style={[
+                            s.memberShareBalance,
+                            net > 0.005 ? s.balPos : net < -0.005 ? s.balNeg : s.balOk,
+                          ]}>
+                            {net > 0.005
+                              ? `+${INR}${net.toFixed(2)}`
+                              : net < -0.005
+                              ? `-${INR}${Math.abs(net).toFixed(2)}`
+                              : '✓'}
+                          </Text>
+                        </View>
+                      );
+                    })}
+                  </View>
+
+                  {/* Settlements this month */}
+                  {settlementExpenses.length > 0 && (
+                    <>
+                      <Text style={[s.sectionHeading, { marginTop: Spacing.lg, marginBottom: Spacing.sm }]}>
+                        Settlements
+                      </Text>
+                      {settlementExpenses.map(sExp => {
+                        const recipient = Object.keys(sExp.shares)[0] ?? '';
+                        return (
+                          <View key={sExp.id} style={s.settlementCard}>
+                            <View style={s.expenseTop}>
+                              <Text style={s.expenseName} numberOfLines={1}>
+                                {`${getMemberName(sExp.email)} → ${getMemberName(recipient)}`}
+                              </Text>
+                              <Text style={[s.expenseCost, { color: Colors.positiveGreen }]}>
+                                {formatCurrency(sExp.cost)}
+                              </Text>
+                            </View>
+                            <Text style={s.expenseMeta}>{formatDisplayDate(sExp.date)}</Text>
+                          </View>
+                        );
+                      })}
+                    </>
+                  )}
+                </>
+              )}
+            </>
           )}
         </ScrollView>
       </View>
@@ -1045,6 +1197,60 @@ const s = StyleSheet.create({
   byAmountStatus: { fontSize: FontSize.sm, fontWeight: '600', marginBottom: Spacing.md, textAlign: 'center' },
   statusOk: { color: Colors.success },
   statusErr: { color: Colors.danger },
+
+  // Month navigator
+  monthNav: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    marginTop: Spacing.lg, marginBottom: Spacing.xs,
+    paddingHorizontal: Spacing.xs,
+  },
+  monthNavArrow: { padding: Spacing.sm },
+  monthNavArrowDim: { opacity: 0.3 },
+  monthNavArrowText: { fontSize: 26, color: Colors.primary, fontWeight: '700', lineHeight: 30 },
+  monthNavLabel: { fontSize: FontSize.md, fontWeight: '700', color: Colors.text },
+  monthlySummaryRow: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingHorizontal: Spacing.xs, marginBottom: Spacing.sm,
+  },
+  monthlySummaryLabel: { fontSize: FontSize.sm, color: Colors.textSecondary },
+  monthlySummaryAmount: { fontSize: FontSize.md, fontWeight: '700', color: Colors.primary },
+
+  // Tabs
+  tabBar: {
+    flexDirection: 'row', borderRadius: BorderRadius.sm,
+    borderWidth: 1, borderColor: Colors.primary,
+    overflow: 'hidden', marginBottom: Spacing.md,
+  },
+  tabBtn: { flex: 1, paddingVertical: Spacing.sm + 2, alignItems: 'center', backgroundColor: Colors.white },
+  tabBtnActive: { backgroundColor: Colors.primary },
+  tabBtnText: { fontSize: FontSize.sm, color: Colors.primary, fontWeight: '700' },
+  tabBtnTextActive: { color: Colors.white },
+
+  // Summary tab — per-member share card
+  memberSharesCard: {
+    backgroundColor: Colors.card, borderRadius: BorderRadius.md,
+    paddingHorizontal: Spacing.md, marginBottom: Spacing.md,
+    elevation: 1, shadowColor: Colors.black, shadowOpacity: 0.05, shadowRadius: 4,
+    shadowOffset: { width: 0, height: 1 },
+  },
+  memberShareRow: {
+    flexDirection: 'row', alignItems: 'center',
+    paddingVertical: Spacing.md,
+    borderBottomWidth: 1, borderBottomColor: Colors.lightGrey,
+    gap: Spacing.sm,
+  },
+  memberShareRowLast: { borderBottomWidth: 0 },
+  memberShareSub: { fontSize: FontSize.xs, color: Colors.textSecondary, marginTop: 2 },
+  memberShareBalance: { fontSize: FontSize.sm, fontWeight: '700', minWidth: 60, textAlign: 'right' },
+
+  // Settlement card (Summary tab)
+  settlementCard: {
+    backgroundColor: Colors.card, borderRadius: BorderRadius.md,
+    padding: Spacing.md, marginBottom: Spacing.sm,
+    borderLeftWidth: 3, borderLeftColor: Colors.positiveGreen,
+    elevation: 1, shadowColor: Colors.black, shadowOpacity: 0.04, shadowRadius: 3,
+    shadowOffset: { width: 0, height: 1 },
+  },
 
   // Settle Up chips
   chipSelector: { flexDirection: 'row', flexWrap: 'wrap', gap: Spacing.sm, marginBottom: Spacing.sm },
