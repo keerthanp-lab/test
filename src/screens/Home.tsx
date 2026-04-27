@@ -24,9 +24,24 @@ import type { Group, MemberBalance, SharedExpense, SplitType } from '../types';
 const INR = '₹';
 const formatCurrency = (amount: number) => `${INR}${Math.abs(amount).toFixed(2)}`;
 const shortEmail = (email: string) => email.slice(0, 5);
+const paidByLabel = (email: string) => (email ?? '').split('@')[0] || email;
 const toDateStr = (d: Date) => d.toISOString().split('T')[0];
-const formatDisplayDate = (dateStr: string) => {
-  const d = new Date(dateStr + 'T00:00:00');
+
+// Handles Firestore Timestamp, YYYY-MM-DD, DD-MM-YYYY, or any parseable string
+const parseAnyDate = (raw: any): Date | null => {
+  if (!raw) return null;
+  if (typeof raw === 'object' && typeof raw.toDate === 'function') return raw.toDate();
+  const s = String(raw);
+  if (/^\d{4}-\d{2}-\d{2}/.test(s)) return new Date(s + 'T00:00:00');
+  const dmy = s.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})/);
+  if (dmy) return new Date(`${dmy[3]}-${dmy[2].padStart(2,'0')}-${dmy[1].padStart(2,'0')}T00:00:00`);
+  const f = new Date(s);
+  return isNaN(f.getTime()) ? null : f;
+};
+
+const formatDisplayDate = (raw: any): string => {
+  const d = parseAnyDate(raw);
+  if (!d) return '—';
   return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
 };
 
@@ -300,6 +315,25 @@ const Home: React.FC = () => {
     setSettlePayer(debtor?.email ?? selectedGroup?.members[0] ?? '');
     setSettleRecipient(creditor?.email ?? selectedGroup?.members[1] ?? '');
     setSettleAmount(debtor ? Math.abs(debtor.balance).toFixed(2) : '');
+    setShowSettleModal(true);
+  };
+
+  // Opens settle modal pre-filled from a specific balance row
+  const openSettleForRow = (b: MemberBalance) => {
+    const balances = computeBalances();
+    if (b.balance < -0.005) {
+      // This person owes → they pay
+      setSettlePayer(b.email);
+      const creditor = balances.find(x => x.email !== b.email && x.balance > 0.005);
+      setSettleRecipient(creditor?.email ?? '');
+      setSettleAmount(Math.abs(b.balance).toFixed(2));
+    } else if (b.balance > 0.005) {
+      // This person is owed → someone pays them
+      setSettleRecipient(b.email);
+      const debtor = balances.find(x => x.email !== b.email && x.balance < -0.005);
+      setSettlePayer(debtor?.email ?? '');
+      setSettleAmount(Math.abs(b.balance).toFixed(2));
+    }
     setShowSettleModal(true);
   };
 
@@ -716,6 +750,7 @@ const Home: React.FC = () => {
                     <Text style={s.balanceAvatarText}>{shortEmail(b.email).toUpperCase()}</Text>
                   </View>
                   <View style={s.balanceRight}>
+                    <Text style={s.balanceName} numberOfLines={1}>{paidByLabel(b.email)}</Text>
                     <Text
                       style={[
                         s.balanceAmount,
@@ -731,6 +766,14 @@ const Home: React.FC = () => {
                       {`paid ${formatCurrency(b.totalPaid)} · share ${formatCurrency(b.totalOwed)}`}
                     </Text>
                   </View>
+                  {Math.abs(b.balance) > 0.005 && (
+                    <TouchableOpacity
+                      style={s.rowSettleBtn}
+                      onPress={() => openSettleForRow(b)}
+                      activeOpacity={0.75}>
+                      <Text style={s.rowSettleBtnText}>Settle</Text>
+                    </TouchableOpacity>
+                  )}
                 </View>
               ))
             )}
@@ -748,7 +791,7 @@ const Home: React.FC = () => {
                   <Text style={s.expenseCost}>{formatCurrency(expense.cost)}</Text>
                 </View>
                 <Text style={s.expenseMeta}>
-                  {`${formatDisplayDate(expense.date)} · paid by ${shortEmail(expense.email)}`}
+                  {`${formatDisplayDate(expense.date)} · paid by ${paidByLabel(expense.email)}`}
                 </Text>
                 <Text style={s.expenseSplitLabel}>
                   {expense.splitType === 'equal' ? 'Split equally'
@@ -878,11 +921,20 @@ const s = StyleSheet.create({
   },
   balanceAvatarText: { fontSize: FontSize.xs, fontWeight: '700', color: Colors.primary },
   balanceRight: { flex: 1 },
+  balanceName: { fontSize: FontSize.xs, color: Colors.textSecondary, marginBottom: 2 },
   balanceAmount: { fontSize: FontSize.sm, fontWeight: '700' },
   balPos: { color: Colors.positiveGreen },
   balNeg: { color: Colors.negativeRed },
   balOk: { color: Colors.neutralGrey },
   balanceSub: { fontSize: FontSize.xs, color: Colors.textSecondary, marginTop: 2 },
+  rowSettleBtn: {
+    backgroundColor: Colors.positiveGreen,
+    paddingHorizontal: Spacing.sm,
+    paddingVertical: Spacing.xs + 2,
+    borderRadius: BorderRadius.pill,
+    marginLeft: Spacing.xs,
+  },
+  rowSettleBtnText: { color: Colors.white, fontSize: FontSize.xs, fontWeight: '700' },
 
   expenseCard: {
     backgroundColor: Colors.card, borderRadius: BorderRadius.md,

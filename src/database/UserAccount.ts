@@ -73,7 +73,7 @@ class FirebaseSerive {
         }
 
     }
-    updateUser = async ({ displayName }: CreateUserAccount) => {
+    updateUser = async ({ displayName }: { displayName: string }) => {
         try {
             await this.account.currentUser.updateProfile({ displayName })
             return true
