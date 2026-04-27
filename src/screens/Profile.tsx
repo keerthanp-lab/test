@@ -11,6 +11,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
+import firestore from '@react-native-firebase/firestore';
 import LogInContext from '../context/LoginContext';
 import { BorderRadius, Colors, FontSize, Spacing } from '../constants/theme';
 
@@ -45,13 +46,25 @@ const Profile: React.FC = () => {
     }
     setSaving(true);
     const ok = await firebase.updateUser({ displayName: displayName.trim() });
-    setSaving(false);
     if (ok) {
+      // Persist to Firestore so group views can look up names by email
+      await firestore()
+        .collection('users')
+        .doc(email)
+        .set(
+          {
+            displayName: displayName.trim(),
+            email,
+            updatedAt: firestore.FieldValue.serverTimestamp(),
+          },
+          { merge: true },
+        );
       setSaved(true);
       setTimeout(() => setSaved(false), 2500);
     } else {
       Alert.alert('Error', 'Failed to update profile. Please try again.');
     }
+    setSaving(false);
   };
 
   return (

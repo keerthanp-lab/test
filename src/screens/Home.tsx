@@ -59,6 +59,7 @@ const Home: React.FC = () => {
 
   const [groupExpenses, setGroupExpenses] = useState<SharedExpense[]>([]);
   const [loadingGroups, setLoadingGroups] = useState(true);
+  const [memberNames, setMemberNames] = useState<Record<string, string>>({}); // email → displayName
 
   // ── Create Group modal ────────────────────────────────────────────────────
   const [showCreateGroup, setShowCreateGroup] = useState(false);
@@ -112,6 +113,25 @@ const Home: React.FC = () => {
     return unsub;
   }, [userEmail]);
 
+  // Fetch display names for all members of the selected group
+  useEffect(() => {
+    if (!selectedGroup) { setMemberNames({}); return; }
+    const emails = selectedGroup.members;
+    if (emails.length === 0) return;
+    const unsub = firestore()
+      .collection('users')
+      .where(firestore.FieldPath.documentId(), 'in', emails)
+      .onSnapshot(snap => {
+        const names: Record<string, string> = {};
+        snap.docs.forEach(doc => {
+          const dn = doc.data()?.displayName;
+          if (dn) names[doc.id] = dn;
+        });
+        setMemberNames(names);
+      });
+    return unsub;
+  }, [selectedGroup?.id]);
+
   useEffect(() => {
     if (!selectedGroupId) { setGroupExpenses([]); return; }
     const unsub = firestore()
@@ -137,6 +157,9 @@ const Home: React.FC = () => {
       return { email, totalPaid, totalOwed, balance: totalPaid - totalOwed };
     });
   }, [selectedGroup, groupExpenses]);
+
+  // Display name → fallback to username part of email
+  const getMemberName = (email: string) => memberNames[email] || paidByLabel(email);
 
   // ─── Shares ───────────────────────────────────────────────────────────────
 
@@ -729,6 +752,9 @@ const Home: React.FC = () => {
             <Text style={s.summaryMeta}>
               {`${selectedGroup.members.length} members · ${groupExpenses.length} expenses`}
             </Text>
+            <Text style={s.summaryMembers} numberOfLines={2}>
+              {selectedGroup.members.map(getMemberName).join(' · ')}
+            </Text>
           </View>
 
           {/* Balances */}
@@ -750,7 +776,7 @@ const Home: React.FC = () => {
                     <Text style={s.balanceAvatarText}>{shortEmail(b.email).toUpperCase()}</Text>
                   </View>
                   <View style={s.balanceRight}>
-                    <Text style={s.balanceName} numberOfLines={1}>{paidByLabel(b.email)}</Text>
+                    <Text style={s.balanceName} numberOfLines={1}>{getMemberName(b.email)}</Text>
                     <Text
                       style={[
                         s.balanceAmount,
@@ -791,7 +817,7 @@ const Home: React.FC = () => {
                   <Text style={s.expenseCost}>{formatCurrency(expense.cost)}</Text>
                 </View>
                 <Text style={s.expenseMeta}>
-                  {`${formatDisplayDate(expense.date)} · paid by ${paidByLabel(expense.email)}`}
+                  {`${formatDisplayDate(expense.date)} · paid by ${getMemberName(expense.email)}`}
                 </Text>
                 <Text style={s.expenseSplitLabel}>
                   {expense.splitType === 'equal' ? 'Split equally'
@@ -803,7 +829,7 @@ const Home: React.FC = () => {
                     .filter(([, amount]) => amount > 0)
                     .map(([email, amount]) => (
                       <View key={email} style={s.shareChip}>
-                        <Text style={s.shareChipEmail}>{shortEmail(email)}</Text>
+                        <Text style={s.shareChipEmail}>{getMemberName(email)}</Text>
                         <Text style={s.shareChipAmount}>{formatCurrency(amount)}</Text>
                       </View>
                     ))}
@@ -890,6 +916,7 @@ const s = StyleSheet.create({
   summaryLabel: { fontSize: FontSize.sm, color: 'rgba(255,255,255,0.8)', fontWeight: '500' },
   summaryAmount: { fontSize: FontSize.xxl, fontWeight: '800', color: Colors.white, marginVertical: Spacing.xs },
   summaryMeta: { fontSize: FontSize.xs, color: 'rgba(255,255,255,0.7)' },
+  summaryMembers: { fontSize: FontSize.xs, color: 'rgba(255,255,255,0.6)', marginTop: 4, textAlign: 'center' },
 
   sectionRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: Spacing.sm, marginTop: Spacing.sm },
   sectionHeading: { fontSize: FontSize.md, fontWeight: '700', color: Colors.text },
