@@ -19,14 +19,18 @@ import { DatePickerField } from '../components/DatePickerField';
 import { BorderRadius, Colors, FontSize, Spacing } from '../constants/theme';
 import type { Group, MemberBalance, SharedExpense, SplitType } from '../types';
 
-const toDateStr = (d: Date) => d.toISOString().split('T')[0];
+// ─── helpers ──────────────────────────────────────────────────────────────────
 
+const INR = '₹';
+const formatCurrency = (amount: number) => `${INR}${Math.abs(amount).toFixed(2)}`;
+const shortEmail = (email: string) => email.slice(0, 5);
+const toDateStr = (d: Date) => d.toISOString().split('T')[0];
 const formatDisplayDate = (dateStr: string) => {
   const d = new Date(dateStr + 'T00:00:00');
   return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
 };
 
-const formatCurrency = (amount: number) => `₹${Math.abs(amount).toFixed(2)}`;
+// ─── Component ────────────────────────────────────────────────────────────────
 
 const Home: React.FC = () => {
   const { firebase } = useContext(LogInContext);
@@ -35,31 +39,43 @@ const Home: React.FC = () => {
   const [userEmail, setUserEmail] = useState('');
 
   const [groups, setGroups] = useState<Group[]>([]);
-  const [selectedGroup, setSelectedGroup] = useState<Group | null>(null);
+  const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
+  const selectedGroup = groups.find(g => g.id === selectedGroupId) ?? null;
+
   const [groupExpenses, setGroupExpenses] = useState<SharedExpense[]>([]);
   const [loadingGroups, setLoadingGroups] = useState(true);
 
-  // Create Group modal
+  // ── Create Group modal ────────────────────────────────────────────────────
   const [showCreateGroup, setShowCreateGroup] = useState(false);
   const [newGroupName, setNewGroupName] = useState('');
   const [memberEmailInput, setMemberEmailInput] = useState('');
   const [pendingMembers, setPendingMembers] = useState<string[]>([]);
 
-  // Expense Form modal
+  // ── Add Member to existing group ─────────────────────────────────────────
+  const [showAddMemberModal, setShowAddMemberModal] = useState(false);
+  const [addMemberEmail, setAddMemberEmail] = useState('');
+
+  // ── Expense form modal ────────────────────────────────────────────────────
   const [showExpenseForm, setShowExpenseForm] = useState(false);
   const [editingExpense, setEditingExpense] = useState<SharedExpense | null>(null);
   const [formItemName, setFormItemName] = useState('');
   const [formCost, setFormCost] = useState('');
   const [formDate, setFormDate] = useState(new Date());
   const [formSplitType, setFormSplitType] = useState<SplitType>('equal');
+  const [formEqualMembers, setFormEqualMembers] = useState<string[]>([]);
   const [formShareInputs, setFormShareInputs] = useState<Record<string, string>>({});
+
+  // ── Settle Up modal ───────────────────────────────────────────────────────
+  const [showSettleModal, setShowSettleModal] = useState(false);
+  const [settlePayer, setSettlePayer] = useState('');
+  const [settleRecipient, setSettleRecipient] = useState('');
+  const [settleAmount, setSettleAmount] = useState('');
+
+  // ─── Effects ──────────────────────────────────────────────────────────────
 
   useEffect(() => {
     firebase.getCurrentUser().then(user => {
-      if (user) {
-        setUserId(user.uid);
-        setUserEmail(user.email ?? '');
-      }
+      if (user) { setUserId(user.uid); setUserEmail(user.email ?? ''); }
     });
   }, []);
 
@@ -82,20 +98,19 @@ const Home: React.FC = () => {
   }, [userEmail]);
 
   useEffect(() => {
-    if (!selectedGroup) {
-      setGroupExpenses([]);
-      return;
-    }
+    if (!selectedGroupId) { setGroupExpenses([]); return; }
     const unsub = firestore()
       .collection('shared_expenses')
-      .where('groupId', '==', selectedGroup.id)
+      .where('groupId', '==', selectedGroupId)
       .onSnapshot(snap => {
         const data = snap.docs.map(d => ({ id: d.id, ...d.data() } as SharedExpense));
         data.sort((a, b) => (b.date > a.date ? 1 : -1));
         setGroupExpenses(data);
       });
     return unsub;
-  }, [selectedGroup?.id]);
+  }, [selectedGroupId]);
+
+  // ─── Balances ─────────────────────────────────────────────────────────────
 
   const computeBalances = useCallback((): MemberBalance[] => {
     if (!selectedGroup) return [];
@@ -108,82 +123,76 @@ const Home: React.FC = () => {
     });
   }, [selectedGroup, groupExpenses]);
 
+  // ─── Shares ───────────────────────────────────────────────────────────────
+
   const computeShares = (
-    members: string[],
+    allMembers: string[],
     cost: number,
     splitType: SplitType,
     inputs: Record<string, string>,
+    equalMembers: string[],
   ): Record<string, number> => {
     if (splitType === 'equal') {
-      const perPerson = cost / members.length;
+      const included = equalMembers.length > 0 ? equalMembers : allMembers;
+      const perPerson = cost / included.length;
       const shares: Record<string, number> = {};
-      members.forEach((m, i) => {
+      allMembers.forEach(m => { shares[m] = 0; });
+      included.forEach((m, i) => {
         shares[m] =
-          i === members.length - 1
-            ? Math.round((cost - perPerson * (members.length - 1)) * 100) / 100
+          i === included.length - 1
+            ? Math.round((cost - perPerson * (included.length - 1)) * 100) / 100
             : Math.round(perPerson * 100) / 100;
       });
       return shares;
     }
     const shares: Record<string, number> = {};
-    members.forEach(m => {
+    allMembers.forEach(m => {
       shares[m] = Math.round((parseFloat(inputs[m] ?? '0') || 0) * 100) / 100;
     });
     return shares;
   };
 
+  // ─── Group handlers ───────────────────────────────────────────────────────
+
   const createGroup = async () => {
-    if (!newGroupName.trim()) {
-      Alert.alert('Error', 'Group name is required');
-      return;
-    }
+    if (!newGroupName.trim()) { Alert.alert('Error', 'Group name is required'); return; }
     const members = [...new Set([userEmail, ...pendingMembers])].filter(Boolean);
-    if (members.length < 2) {
-      Alert.alert('Error', 'Add at least one other member');
-      return;
-    }
+    if (members.length < 2) { Alert.alert('Error', 'Add at least one other member'); return; }
     const now = firestore.FieldValue.serverTimestamp();
     await firestore().collection('groups').add({
-      name: newGroupName.trim(),
-      members,
-      createdBy: userId,
-      createdAt: now,
-      updated_last: now,
+      name: newGroupName.trim(), members, createdBy: userId, createdAt: now, updated_last: now,
     });
-    resetCreateGroupForm();
-  };
-
-  const resetCreateGroupForm = () => {
-    setNewGroupName('');
-    setPendingMembers([]);
-    setMemberEmailInput('');
-    setShowCreateGroup(false);
+    setNewGroupName(''); setPendingMembers([]); setMemberEmailInput(''); setShowCreateGroup(false);
   };
 
   const addPendingMember = () => {
     const email = memberEmailInput.trim().toLowerCase();
-    if (!email || !/\S+@\S+\.\S+/.test(email)) {
-      Alert.alert('Error', 'Enter a valid email address');
-      return;
-    }
-    if (email === userEmail.toLowerCase()) {
-      Alert.alert('Error', 'You are already included in the group');
-      return;
-    }
-    if (pendingMembers.includes(email)) {
-      Alert.alert('Error', 'This member is already added');
-      return;
-    }
+    if (!email || !/\S+@\S+\.\S+/.test(email)) { Alert.alert('Error', 'Enter a valid email'); return; }
+    if (email === userEmail.toLowerCase()) { Alert.alert('Error', 'You are already included'); return; }
+    if (pendingMembers.includes(email)) { Alert.alert('Error', 'Already added'); return; }
     setPendingMembers(prev => [...prev, email]);
     setMemberEmailInput('');
   };
 
+  const addMemberToGroup = async () => {
+    const email = addMemberEmail.trim().toLowerCase();
+    if (!email || !/\S+@\S+\.\S+/.test(email)) { Alert.alert('Error', 'Enter a valid email'); return; }
+    if (selectedGroup?.members.includes(email)) { Alert.alert('Error', 'Already a member'); return; }
+    await firestore().collection('groups').doc(selectedGroup!.id).update({
+      members: firestore.FieldValue.arrayUnion(email),
+      updated_last: firestore.FieldValue.serverTimestamp(),
+    });
+    setAddMemberEmail('');
+    setShowAddMemberModal(false);
+  };
+
+  // ─── Expense handlers ─────────────────────────────────────────────────────
+
   const openAddExpenseForm = () => {
     setEditingExpense(null);
-    setFormItemName('');
-    setFormCost('');
-    setFormDate(new Date());
+    setFormItemName(''); setFormCost(''); setFormDate(new Date());
     setFormSplitType('equal');
+    setFormEqualMembers(selectedGroup?.members ?? []);
     const inputs: Record<string, string> = {};
     selectedGroup?.members.forEach(m => { inputs[m] = ''; });
     setFormShareInputs(inputs);
@@ -196,6 +205,11 @@ const Home: React.FC = () => {
     setFormCost(String(expense.cost));
     setFormDate(new Date(expense.date + 'T00:00:00'));
     setFormSplitType(expense.splitType);
+    // Reconstruct checked members from shares (non-zero entries)
+    const checked = Object.entries(expense.shares)
+      .filter(([, v]) => v > 0)
+      .map(([k]) => k);
+    setFormEqualMembers(checked.length ? checked : (selectedGroup?.members ?? []));
     const inputs: Record<string, string> = {};
     selectedGroup?.members.forEach(m => { inputs[m] = String(expense.shares[m] ?? ''); });
     setFormShareInputs(inputs);
@@ -207,35 +221,29 @@ const Home: React.FC = () => {
     if (!formItemName.trim()) { Alert.alert('Error', 'Item name is required'); return; }
     const cost = parseFloat(formCost);
     if (!cost || cost <= 0) { Alert.alert('Error', 'Enter a valid amount'); return; }
-
+    if (formSplitType === 'equal' && formEqualMembers.length === 0) {
+      Alert.alert('Error', 'Select at least one member for the split');
+      return;
+    }
     if (formSplitType === 'byAmount') {
       const total = selectedGroup.members.reduce(
-        (s, m) => s + (parseFloat(formShareInputs[m] ?? '0') || 0),
-        0,
+        (s, m) => s + (parseFloat(formShareInputs[m] ?? '0') || 0), 0,
       );
       if (Math.abs(total - cost) > 0.01) {
         Alert.alert(
           'Split Mismatch',
-          `Share amounts (₹${total.toFixed(2)}) must equal total cost (₹${cost.toFixed(2)})`,
+          `Share amounts (${INR}${total.toFixed(2)}) must equal total cost (${INR}${cost.toFixed(2)})`,
         );
         return;
       }
     }
-
-    const shares = computeShares(selectedGroup.members, cost, formSplitType, formShareInputs);
+    const shares = computeShares(selectedGroup.members, cost, formSplitType, formShareInputs, formEqualMembers);
     const now = firestore.FieldValue.serverTimestamp();
     const data = {
-      itemName: formItemName.trim(),
-      cost,
-      date: toDateStr(formDate),
-      userId,
-      email: userEmail,
-      groupId: selectedGroup.id,
-      splitType: formSplitType,
-      shares,
-      updated_last: now,
+      itemName: formItemName.trim(), cost, date: toDateStr(formDate),
+      userId, email: userEmail, groupId: selectedGroup.id,
+      splitType: formSplitType, shares, updated_last: now,
     };
-
     if (editingExpense) {
       await firestore().collection('shared_expenses').doc(editingExpense.id).update(data);
     } else {
@@ -246,53 +254,83 @@ const Home: React.FC = () => {
   };
 
   const deleteExpense = (expense: SharedExpense) => {
-    Alert.alert('Delete Expense', `Remove "${expense.itemName}"?`, [
+    Alert.alert('Delete', `Remove "${expense.itemName}"?`, [
       { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Delete',
-        style: 'destructive',
-        onPress: () => firestore().collection('shared_expenses').doc(expense.id).delete(),
-      },
+      { text: 'Delete', style: 'destructive', onPress: () => firestore().collection('shared_expenses').doc(expense.id).delete() },
     ]);
   };
 
-  // ─── Create Group Modal ───────────────────────────────────────────────────────
+  // ─── Settle Up ────────────────────────────────────────────────────────────
+
+  const openSettleModal = () => {
+    const balances = computeBalances();
+    const debtor = balances.find(b => b.balance < -0.005);
+    const creditor = balances.find(b => b.balance > 0.005);
+    setSettlePayer(debtor?.email ?? selectedGroup?.members[0] ?? '');
+    setSettleRecipient(creditor?.email ?? selectedGroup?.members[1] ?? '');
+    setSettleAmount(debtor ? Math.abs(debtor.balance).toFixed(2) : '');
+    setShowSettleModal(true);
+  };
+
+  const settleUp = async () => {
+    if (!settlePayer || !settleRecipient) { Alert.alert('Error', 'Select payer and recipient'); return; }
+    if (settlePayer === settleRecipient) { Alert.alert('Error', 'Payer and recipient must be different'); return; }
+    const amount = parseFloat(settleAmount);
+    if (!amount || amount <= 0) { Alert.alert('Error', 'Enter a valid amount'); return; }
+    const now = firestore.FieldValue.serverTimestamp();
+    await firestore().collection('shared_expenses').add({
+      itemName: 'Settlement',
+      cost: amount,
+      date: toDateStr(new Date()),
+      userId,
+      email: settlePayer,
+      groupId: selectedGroup!.id,
+      splitType: 'settlement' as SplitType,
+      shares: { [settleRecipient]: amount },
+      createdAt: now,
+      updated_last: now,
+    });
+    await firestore().collection('groups').doc(selectedGroup!.id).update({ updated_last: now });
+    setShowSettleModal(false);
+    setSettleAmount('');
+  };
+
+  // ─── Modals ───────────────────────────────────────────────────────────────
 
   const renderCreateGroupModal = () => (
     <Modal visible={showCreateGroup} animationType="slide" transparent>
-      <View style={styles.overlay}>
-        <KeyboardAvoidingView
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-          style={styles.overlayInner}>
+      <View style={s.overlay}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={s.overlayInner}>
           <ScrollView bounces={false} keyboardShouldPersistTaps="handled">
-            <View style={styles.modalCard}>
-              <Text style={styles.modalTitle}>Create Group</Text>
+            <View style={s.modalCard}>
+              <Text style={s.modalTitle}>Create Group</Text>
 
-              <Text style={styles.fieldLabel}>Group Name</Text>
+              <Text style={s.fieldLabel}>Group Name</Text>
               <TextInput
-                style={styles.textInput}
+                style={s.textInput}
                 placeholder="e.g. Our Apartment"
                 placeholderTextColor={Colors.grey}
                 value={newGroupName}
                 onChangeText={setNewGroupName}
               />
 
-              <Text style={styles.fieldLabel}>Members</Text>
-              <Text style={styles.fieldHint}>You are included automatically.</Text>
+              <Text style={s.fieldLabel}>Members</Text>
+              <Text style={s.fieldHint}>You are included automatically.</Text>
 
-              {pendingMembers.map(m => (
-                <View key={m} style={styles.memberChip}>
-                  <Text style={styles.memberChipText} numberOfLines={1}>{m}</Text>
-                  <TouchableOpacity
-                    onPress={() => setPendingMembers(prev => prev.filter(x => x !== m))}>
-                    <Text style={styles.memberChipRemove}>&#10005;</Text>
-                  </TouchableOpacity>
-                </View>
-              ))}
+              <View style={s.chipsWrap}>
+                {pendingMembers.map(m => (
+                  <View key={m} style={s.memberChip}>
+                    <Text style={s.memberChipText} numberOfLines={1}>{shortEmail(m)}</Text>
+                    <TouchableOpacity onPress={() => setPendingMembers(p => p.filter(x => x !== m))}>
+                      <Text style={s.memberChipRemove}>&#10005;</Text>
+                    </TouchableOpacity>
+                  </View>
+                ))}
+              </View>
 
-              <View style={styles.memberAddRow}>
+              <View style={s.memberAddRow}>
                 <TextInput
-                  style={[styles.textInput, styles.memberEmailInput]}
+                  style={[s.textInput, s.flex1, { marginBottom: 0 }]}
                   placeholder="email@example.com"
                   placeholderTextColor={Colors.grey}
                   value={memberEmailInput}
@@ -300,17 +338,17 @@ const Home: React.FC = () => {
                   keyboardType="email-address"
                   autoCapitalize="none"
                 />
-                <TouchableOpacity style={styles.addMemberBtn} onPress={addPendingMember}>
-                  <Text style={styles.addMemberBtnText}>+ Add</Text>
+                <TouchableOpacity style={s.addBtn} onPress={addPendingMember}>
+                  <Text style={s.addBtnText}>+ Add</Text>
                 </TouchableOpacity>
               </View>
 
-              <View style={styles.modalFooter}>
-                <TouchableOpacity style={styles.cancelBtn} onPress={resetCreateGroupForm}>
-                  <Text style={styles.cancelBtnText}>Cancel</Text>
+              <View style={s.modalFooter}>
+                <TouchableOpacity style={s.cancelBtn} onPress={() => { setShowCreateGroup(false); setNewGroupName(''); setPendingMembers([]); setMemberEmailInput(''); }}>
+                  <Text style={s.cancelBtnText}>Cancel</Text>
                 </TouchableOpacity>
-                <TouchableOpacity style={styles.primaryBtn} onPress={createGroup}>
-                  <Text style={styles.primaryBtnText}>Create Group</Text>
+                <TouchableOpacity style={s.primaryBtn} onPress={createGroup}>
+                  <Text style={s.primaryBtnText}>Create Group</Text>
                 </TouchableOpacity>
               </View>
             </View>
@@ -320,118 +358,98 @@ const Home: React.FC = () => {
     </Modal>
   );
 
-  // ─── Expense Form Modal ───────────────────────────────────────────────────────
+  const renderAddMemberModal = () => (
+    <Modal visible={showAddMemberModal} animationType="slide" transparent>
+      <View style={s.overlay}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={s.overlayInner}>
+          <View style={s.modalCard}>
+            <Text style={s.modalTitle}>Add Member</Text>
+            <Text style={s.fieldLabel}>Member Email</Text>
+            <View style={s.memberAddRow}>
+              <TextInput
+                style={[s.textInput, s.flex1, { marginBottom: 0 }]}
+                placeholder="email@example.com"
+                placeholderTextColor={Colors.grey}
+                value={addMemberEmail}
+                onChangeText={setAddMemberEmail}
+                keyboardType="email-address"
+                autoCapitalize="none"
+                autoFocus
+              />
+            </View>
+            <View style={[s.modalFooter, { marginTop: Spacing.md }]}>
+              <TouchableOpacity style={s.cancelBtn} onPress={() => { setShowAddMemberModal(false); setAddMemberEmail(''); }}>
+                <Text style={s.cancelBtnText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={s.primaryBtn} onPress={addMemberToGroup}>
+                <Text style={s.primaryBtnText}>Add</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </View>
+    </Modal>
+  );
 
-  const renderExpenseFormModal = () => {
+  const renderSettleModal = () => {
     const members = selectedGroup?.members ?? [];
-    const costNum = parseFloat(formCost) || 0;
-    const equalShare =
-      members.length > 0 ? Math.round((costNum / members.length) * 100) / 100 : 0;
-    const byAmountTotal = members.reduce(
-      (s, m) => s + (parseFloat(formShareInputs[m] ?? '0') || 0),
-      0,
-    );
-    const byAmountOk = costNum > 0 && Math.abs(byAmountTotal - costNum) <= 0.01;
-
     return (
-      <Modal visible={showExpenseForm} animationType="slide" transparent>
-        <View style={styles.overlay}>
-          <KeyboardAvoidingView
-            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-            style={styles.overlayInner}>
+      <Modal visible={showSettleModal} animationType="slide" transparent>
+        <View style={s.overlay}>
+          <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={s.overlayInner}>
             <ScrollView bounces={false} keyboardShouldPersistTaps="handled">
-              <View style={styles.modalCard}>
-                <Text style={styles.modalTitle}>
-                  {editingExpense ? 'Edit Expense' : 'Add Expense'}
-                </Text>
+              <View style={s.modalCard}>
+                <Text style={s.modalTitle}>Settle Up</Text>
 
-                <Text style={styles.fieldLabel}>Item Name</Text>
-                <TextInput
-                  style={styles.textInput}
-                  placeholder="e.g. Electricity bill"
-                  placeholderTextColor={Colors.grey}
-                  value={formItemName}
-                  onChangeText={setFormItemName}
-                />
-
-                <Text style={styles.fieldLabel}>Amount (₹)</Text>
-                <TextInput
-                  style={styles.textInput}
-                  placeholder="0.00"
-                  placeholderTextColor={Colors.grey}
-                  value={formCost}
-                  onChangeText={setFormCost}
-                  keyboardType="decimal-pad"
-                />
-
-                <DatePickerField label="Expense Date" value={formDate} onChange={setFormDate} />
-
-                <Text style={styles.fieldLabel}>Split Type</Text>
-                <View style={styles.splitToggle}>
-                  {(['equal', 'byAmount'] as SplitType[]).map(type => (
+                {/* Who paid — dropdown chips */}
+                <Text style={s.fieldLabel}>Who paid?</Text>
+                <View style={s.chipSelector}>
+                  {members.map(m => (
                     <TouchableOpacity
-                      key={type}
-                      style={[
-                        styles.splitToggleBtn,
-                        formSplitType === type && styles.splitToggleBtnActive,
-                      ]}
-                      onPress={() => setFormSplitType(type)}>
-                      <Text
-                        style={[
-                          styles.splitToggleBtnText,
-                          formSplitType === type && styles.splitToggleBtnTextActive,
-                        ]}>
-                        {type === 'equal' ? 'Equal' : 'By Amount'}
+                      key={m}
+                      style={[s.selectorChip, settlePayer === m && s.selectorChipActive]}
+                      onPress={() => setSettlePayer(m)}
+                      activeOpacity={0.7}>
+                      <Text style={[s.selectorChipText, settlePayer === m && s.selectorChipTextActive]}>
+                        {shortEmail(m)}
                       </Text>
                     </TouchableOpacity>
                   ))}
                 </View>
 
-                {formSplitType === 'equal' ? (
-                  <View style={styles.equalSplitBox}>
-                    <Text style={styles.equalSplitText}>
-                      {members.length} members &middot; ₹{equalShare.toFixed(2)} each
-                    </Text>
-                  </View>
-                ) : (
-                  <View>
-                    <Text style={styles.fieldLabel}>Each Member's Share</Text>
-                    {members.map(m => (
-                      <View key={m} style={styles.memberShareRow}>
-                        <Text style={styles.memberShareEmail} numberOfLines={1}>{m}</Text>
-                        <TextInput
-                          style={styles.memberShareInput}
-                          placeholder="0.00"
-                          placeholderTextColor={Colors.grey}
-                          value={formShareInputs[m] ?? ''}
-                          onChangeText={v =>
-                            setFormShareInputs(prev => ({ ...prev, [m]: v }))
-                          }
-                          keyboardType="decimal-pad"
-                        />
-                      </View>
-                    ))}
-                    <Text
-                      style={[
-                        styles.byAmountStatus,
-                        byAmountOk ? styles.byAmountOk : styles.byAmountError,
-                      ]}>
-                      Total: ₹{byAmountTotal.toFixed(2)} / ₹{costNum.toFixed(2)}
-                      {byAmountOk ? '  \u2713' : '  (must match)'}
-                    </Text>
-                  </View>
-                )}
+                {/* To whom */}
+                <Text style={s.fieldLabel}>To whom?</Text>
+                <View style={s.chipSelector}>
+                  {members.filter(m => m !== settlePayer).map(m => (
+                    <TouchableOpacity
+                      key={m}
+                      style={[s.selectorChip, settleRecipient === m && s.selectorChipActive]}
+                      onPress={() => setSettleRecipient(m)}
+                      activeOpacity={0.7}>
+                      <Text style={[s.selectorChipText, settleRecipient === m && s.selectorChipTextActive]}>
+                        {shortEmail(m)}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
 
-                <View style={styles.modalFooter}>
-                  <TouchableOpacity
-                    style={styles.cancelBtn}
-                    onPress={() => setShowExpenseForm(false)}>
-                    <Text style={styles.cancelBtnText}>Cancel</Text>
+                {/* Amount */}
+                <Text style={s.fieldLabel}>Amount ({INR})</Text>
+                <TextInput
+                  style={s.textInput}
+                  placeholder="0.00"
+                  placeholderTextColor={Colors.grey}
+                  value={settleAmount}
+                  onChangeText={setSettleAmount}
+                  keyboardType="decimal-pad"
+                />
+
+                <View style={s.modalFooter}>
+                  <TouchableOpacity style={s.cancelBtn} onPress={() => setShowSettleModal(false)}>
+                    <Text style={s.cancelBtnText}>Cancel</Text>
                   </TouchableOpacity>
-                  <TouchableOpacity style={styles.primaryBtn} onPress={saveExpense}>
-                    <Text style={styles.primaryBtnText}>
-                      {editingExpense ? 'Update' : 'Add Expense'}
-                    </Text>
+                  <TouchableOpacity style={s.primaryBtn} onPress={settleUp}>
+                    <Text style={s.primaryBtnText}>Confirm</Text>
                   </TouchableOpacity>
                 </View>
               </View>
@@ -442,27 +460,149 @@ const Home: React.FC = () => {
     );
   };
 
-  // ─── Group List View ──────────────────────────────────────────────────────────
+  const renderExpenseFormModal = () => {
+    const members = selectedGroup?.members ?? [];
+    const costNum = parseFloat(formCost) || 0;
+    const perPerson = formEqualMembers.length > 0 && costNum > 0
+      ? costNum / formEqualMembers.length
+      : 0;
+    const byAmountTotal = members.reduce(
+      (sum, m) => sum + (parseFloat(formShareInputs[m] ?? '0') || 0), 0,
+    );
+    const byAmountOk = costNum > 0 && Math.abs(byAmountTotal - costNum) <= 0.01;
+
+    return (
+      <Modal visible={showExpenseForm} animationType="slide" transparent>
+        <View style={s.overlay}>
+          <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={s.overlayInner}>
+            <ScrollView bounces={false} keyboardShouldPersistTaps="handled">
+              <View style={s.modalCard}>
+                <Text style={s.modalTitle}>{editingExpense ? 'Edit Expense' : 'Add Expense'}</Text>
+
+                <Text style={s.fieldLabel}>Item Name</Text>
+                <TextInput
+                  style={s.textInput}
+                  placeholder="e.g. Electricity bill"
+                  placeholderTextColor={Colors.grey}
+                  value={formItemName}
+                  onChangeText={setFormItemName}
+                />
+
+                <Text style={s.fieldLabel}>Amount ({INR})</Text>
+                <TextInput
+                  style={s.textInput}
+                  placeholder="0.00"
+                  placeholderTextColor={Colors.grey}
+                  value={formCost}
+                  onChangeText={setFormCost}
+                  keyboardType="decimal-pad"
+                />
+
+                <DatePickerField label="Expense Date" value={formDate} onChange={setFormDate} />
+
+                <Text style={s.fieldLabel}>Split Type</Text>
+                <View style={s.splitToggle}>
+                  {(['equal', 'byAmount'] as SplitType[]).map(type => (
+                    <TouchableOpacity
+                      key={type}
+                      style={[s.splitBtn, formSplitType === type && s.splitBtnActive]}
+                      onPress={() => setFormSplitType(type)}>
+                      <Text style={[s.splitBtnText, formSplitType === type && s.splitBtnTextActive]}>
+                        {type === 'equal' ? 'Equal' : 'By Amount'}
+                      </Text>
+                    </TouchableOpacity>
+                  ))}
+                </View>
+
+                {/* Equal split — checkboxes */}
+                {formSplitType === 'equal' && (
+                  <View style={s.splitSection}>
+                    <Text style={s.fieldLabel}>Split among:</Text>
+                    {members.map(m => {
+                      const checked = formEqualMembers.includes(m);
+                      return (
+                        <TouchableOpacity
+                          key={m}
+                          style={s.checkRow}
+                          onPress={() =>
+                            setFormEqualMembers(prev =>
+                              checked ? prev.filter(x => x !== m) : [...prev, m],
+                            )
+                          }
+                          activeOpacity={0.7}>
+                          <View style={[s.checkbox, checked && s.checkboxOn]}>
+                            {checked && <Text style={s.checkTick}>&#10003;</Text>}
+                          </View>
+                          <Text style={s.checkLabel} numberOfLines={1}>{shortEmail(m)}</Text>
+                          {checked && perPerson > 0 && (
+                            <Text style={s.checkShare}>{formatCurrency(perPerson)}</Text>
+                          )}
+                        </TouchableOpacity>
+                      );
+                    })}
+                    {formEqualMembers.length === 0 && (
+                      <Text style={s.warnText}>Select at least one member</Text>
+                    )}
+                  </View>
+                )}
+
+                {/* By amount — manual inputs */}
+                {formSplitType === 'byAmount' && (
+                  <View>
+                    <Text style={s.fieldLabel}>Each Member's Share</Text>
+                    {members.map(m => (
+                      <View key={m} style={s.shareRow}>
+                        <Text style={s.shareEmail} numberOfLines={1}>{shortEmail(m)}</Text>
+                        <TextInput
+                          style={s.shareInput}
+                          placeholder="0.00"
+                          placeholderTextColor={Colors.grey}
+                          value={formShareInputs[m] ?? ''}
+                          onChangeText={v => setFormShareInputs(prev => ({ ...prev, [m]: v }))}
+                          keyboardType="decimal-pad"
+                        />
+                      </View>
+                    ))}
+                    <Text style={[s.byAmountStatus, byAmountOk ? s.statusOk : s.statusErr]}>
+                      {`Total: ${INR}${byAmountTotal.toFixed(2)} / ${INR}${costNum.toFixed(2)}`}
+                      {byAmountOk ? '  ✓' : '  (must match)'}
+                    </Text>
+                  </View>
+                )}
+
+                <View style={s.modalFooter}>
+                  <TouchableOpacity style={s.cancelBtn} onPress={() => setShowExpenseForm(false)}>
+                    <Text style={s.cancelBtnText}>Cancel</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={s.primaryBtn} onPress={saveExpense}>
+                    <Text style={s.primaryBtnText}>{editingExpense ? 'Update' : 'Add Expense'}</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            </ScrollView>
+          </KeyboardAvoidingView>
+        </View>
+      </Modal>
+    );
+  };
+
+  // ─── Group List ───────────────────────────────────────────────────────────
 
   const renderGroupList = () => (
-    <View style={styles.screen}>
-      <View style={styles.topBar}>
-        <Text style={styles.topBarTitle}>Shared Expenses</Text>
-        <TouchableOpacity
-          style={styles.topBarAction}
-          onPress={() => setShowCreateGroup(true)}>
-          <Text style={styles.topBarActionText}>+ Group</Text>
+    <View style={s.screen}>
+      <View style={s.topBar}>
+        <Text style={s.topBarTitle}>Shared Expenses</Text>
+        <TouchableOpacity style={s.topBarAction} onPress={() => setShowCreateGroup(true)}>
+          <Text style={s.topBarActionText}>+ Group</Text>
         </TouchableOpacity>
       </View>
 
       {loadingGroups ? (
         <ActivityIndicator color={Colors.primary} style={{ marginTop: 40 }} />
       ) : groups.length === 0 ? (
-        <View style={styles.emptyState}>
-          <Text style={styles.emptyTitle}>No groups yet</Text>
-          <Text style={styles.emptySubtitle}>
-            Tap "+ Group" to create a shared expense group with friends or roommates.
-          </Text>
+        <View style={s.emptyState}>
+          <Text style={s.emptyTitle}>No groups yet</Text>
+          <Text style={s.emptySub}>Tap "+ Group" to create a shared expense group.</Text>
         </View>
       ) : (
         <FlatList
@@ -471,16 +611,16 @@ const Home: React.FC = () => {
           contentContainerStyle={{ padding: Spacing.lg }}
           renderItem={({ item: group }) => (
             <TouchableOpacity
-              style={styles.groupCard}
-              onPress={() => setSelectedGroup(group)}
+              style={s.groupCard}
+              onPress={() => setSelectedGroupId(group.id)}
               activeOpacity={0.75}>
-              <View style={styles.groupCardRow}>
-                <Text style={styles.groupName}>{group.name}</Text>
-                <Text style={styles.groupArrow}>&rsaquo;</Text>
+              <View style={s.groupCardRow}>
+                <Text style={s.groupName}>{group.name}</Text>
+                <Text style={s.groupArrow}>&rsaquo;</Text>
               </View>
-              <Text style={styles.groupMeta}>{group.members.length} members</Text>
-              <Text style={styles.groupMemberList} numberOfLines={1}>
-                {group.members.join(', ')}
+              <Text style={s.groupMeta}>{group.members.length} members</Text>
+              <Text style={s.groupMemberList} numberOfLines={1}>
+                {group.members.map(shortEmail).join(', ')}
               </Text>
             </TouchableOpacity>
           )}
@@ -489,7 +629,7 @@ const Home: React.FC = () => {
     </View>
   );
 
-  // ─── Group Detail View ────────────────────────────────────────────────────────
+  // ─── Group Detail ─────────────────────────────────────────────────────────
 
   const renderGroupDetail = () => {
     if (!selectedGroup) return null;
@@ -497,62 +637,62 @@ const Home: React.FC = () => {
     const totalExpenses = groupExpenses.reduce((s, e) => s + e.cost, 0);
 
     return (
-      <View style={styles.screen}>
-        <View style={styles.topBar}>
-          <TouchableOpacity onPress={() => setSelectedGroup(null)} style={styles.backBtn}>
-            <Text style={styles.backBtnText}>&lsaquo; Back</Text>
+      <View style={s.screen}>
+        <View style={s.topBar}>
+          <TouchableOpacity onPress={() => setSelectedGroupId(null)} style={s.backBtn}>
+            <Text style={s.backBtnText}>&lsaquo; Back</Text>
           </TouchableOpacity>
-          <Text style={styles.topBarTitle} numberOfLines={1}>
-            {selectedGroup.name}
-          </Text>
-          <TouchableOpacity style={styles.topBarAction} onPress={openAddExpenseForm}>
-            <Text style={styles.topBarActionText}>+ Add</Text>
+          <Text style={s.topBarTitle} numberOfLines={1}>{selectedGroup.name}</Text>
+          <TouchableOpacity style={[s.topBarAction, { backgroundColor: Colors.secondary, marginRight: 6 }]} onPress={() => setShowAddMemberModal(true)}>
+            <Text style={s.topBarActionText}>+ Member</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={s.topBarAction} onPress={openAddExpenseForm}>
+            <Text style={s.topBarActionText}>+ Add</Text>
           </TouchableOpacity>
         </View>
 
-        <ScrollView contentContainerStyle={styles.detailContent}>
-          <View style={styles.summaryCard}>
-            <Text style={styles.summaryLabel}>Total Expenses</Text>
-            <Text style={styles.summaryAmount}>{formatCurrency(totalExpenses)}</Text>
-            <Text style={styles.summaryMeta}>
-              {selectedGroup.members.length} members &middot; {groupExpenses.length} expenses
+        <ScrollView contentContainerStyle={s.detailContent}>
+          {/* Summary */}
+          <View style={s.summaryCard}>
+            <Text style={s.summaryLabel}>Total Expenses</Text>
+            <Text style={s.summaryAmount}>{formatCurrency(totalExpenses)}</Text>
+            <Text style={s.summaryMeta}>
+              {`${selectedGroup.members.length} members · ${groupExpenses.length} expenses`}
             </Text>
           </View>
 
-          <Text style={styles.sectionHeading}>Member Balances</Text>
-          <View style={styles.balanceCard}>
+          {/* Balances */}
+          <View style={s.sectionRow}>
+            <Text style={s.sectionHeading}>Member Balances</Text>
+            <TouchableOpacity style={s.settleBtn} onPress={openSettleModal}>
+              <Text style={s.settleBtnText}>Settle Up</Text>
+            </TouchableOpacity>
+          </View>
+          <View style={s.balanceCard}>
             {balances.length === 0 ? (
-              <Text style={styles.noDataText}>Add expenses to see balances.</Text>
+              <Text style={s.noDataText}>Add expenses to see balances.</Text>
             ) : (
               balances.map((b, idx) => (
                 <View
                   key={b.email}
-                  style={[
-                    styles.balanceRow,
-                    idx === balances.length - 1 && styles.balanceRowLast,
-                  ]}>
-                  <Text style={styles.balanceEmail} numberOfLines={1}>
-                    {b.email}
-                  </Text>
-                  <View style={styles.balanceRight}>
+                  style={[s.balanceRow, idx === balances.length - 1 && s.balanceRowLast]}>
+                  <View style={s.balanceAvatar}>
+                    <Text style={s.balanceAvatarText}>{shortEmail(b.email).toUpperCase()}</Text>
+                  </View>
+                  <View style={s.balanceRight}>
                     <Text
                       style={[
-                        styles.balanceAmount,
-                        b.balance > 0.005
-                          ? styles.balancePositive
-                          : b.balance < -0.005
-                          ? styles.balanceNegative
-                          : styles.balanceSettled,
+                        s.balanceAmount,
+                        b.balance > 0.005 ? s.balPos : b.balance < -0.005 ? s.balNeg : s.balOk,
                       ]}>
                       {b.balance > 0.005
                         ? `gets back ${formatCurrency(b.balance)}`
                         : b.balance < -0.005
                         ? `owes ${formatCurrency(b.balance)}`
-                        : 'Settled \u2713'}
+                        : `Settled ✓`}
                     </Text>
-                    <Text style={styles.balanceSub}>
-                      paid {formatCurrency(b.totalPaid)} &middot; share{' '}
-                      {formatCurrency(b.totalOwed)}
+                    <Text style={s.balanceSub}>
+                      {`paid ${formatCurrency(b.totalPaid)} · share ${formatCurrency(b.totalOwed)}`}
                     </Text>
                   </View>
                 </View>
@@ -560,46 +700,45 @@ const Home: React.FC = () => {
             )}
           </View>
 
-          <Text style={styles.sectionHeading}>Expenses</Text>
+          {/* Expenses */}
+          <Text style={s.sectionHeading}>Expenses</Text>
           {groupExpenses.length === 0 ? (
-            <Text style={styles.noDataText}>
-              No expenses yet. Tap "+ Add" to record one.
-            </Text>
+            <Text style={s.noDataText}>No expenses yet. Tap "+ Add" to record one.</Text>
           ) : (
             groupExpenses.map(expense => (
-              <View key={expense.id} style={styles.expenseCard}>
-                <View style={styles.expenseCardTop}>
-                  <Text style={styles.expenseItemName}>{expense.itemName}</Text>
-                  <Text style={styles.expenseTotalCost}>{formatCurrency(expense.cost)}</Text>
+              <View key={expense.id} style={s.expenseCard}>
+                <View style={s.expenseTop}>
+                  <Text style={s.expenseName}>{expense.itemName}</Text>
+                  <Text style={s.expenseCost}>{formatCurrency(expense.cost)}</Text>
                 </View>
-                <Text style={styles.expenseMeta}>
-                  {formatDisplayDate(expense.date)} &middot; paid by {expense.email}
+                <Text style={s.expenseMeta}>
+                  {`${formatDisplayDate(expense.date)} · paid by ${shortEmail(expense.email)}`}
                 </Text>
-                <Text style={styles.expenseSplitLabel}>
-                  {expense.splitType === 'equal' ? 'Split equally' : 'Split by amount'}
+                <Text style={s.expenseSplitLabel}>
+                  {expense.splitType === 'equal' ? 'Split equally'
+                    : expense.splitType === 'settlement' ? 'Settlement'
+                    : 'Split by amount'}
                 </Text>
-                <View style={styles.sharesRow}>
-                  {Object.entries(expense.shares).map(([email, amount]) => (
-                    <View key={email} style={styles.shareChip}>
-                      <Text style={styles.shareChipEmail} numberOfLines={1}>
-                        {email.split('@')[0]}
-                      </Text>
-                      <Text style={styles.shareChipAmount}>{formatCurrency(amount)}</Text>
-                    </View>
-                  ))}
+                <View style={s.sharesRow}>
+                  {Object.entries(expense.shares)
+                    .filter(([, amount]) => amount > 0)
+                    .map(([email, amount]) => (
+                      <View key={email} style={s.shareChip}>
+                        <Text style={s.shareChipEmail}>{shortEmail(email)}</Text>
+                        <Text style={s.shareChipAmount}>{formatCurrency(amount)}</Text>
+                      </View>
+                    ))}
                 </View>
-                <View style={styles.expenseActions}>
-                  <TouchableOpacity
-                    style={styles.editBtn}
-                    onPress={() => openEditExpenseForm(expense)}>
-                    <Text style={styles.editBtnText}>Edit</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={styles.deleteBtn}
-                    onPress={() => deleteExpense(expense)}>
-                    <Text style={styles.deleteBtnText}>Delete</Text>
-                  </TouchableOpacity>
-                </View>
+                {expense.splitType !== 'settlement' && (
+                  <View style={s.expenseActions}>
+                    <TouchableOpacity style={s.editBtn} onPress={() => openEditExpenseForm(expense)}>
+                      <Text style={s.editBtnText}>Edit</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity style={s.deleteBtn} onPress={() => deleteExpense(expense)}>
+                      <Text style={s.deleteBtnText}>Delete</Text>
+                    </TouchableOpacity>
+                  </View>
+                )}
               </View>
             ))
           )}
@@ -608,372 +747,204 @@ const Home: React.FC = () => {
     );
   };
 
+  // ─── Root render ──────────────────────────────────────────────────────────
+
   return (
-    <View style={styles.root}>
+    <View style={s.root}>
       {selectedGroup ? renderGroupDetail() : renderGroupList()}
       {renderCreateGroupModal()}
+      {renderAddMemberModal()}
       {renderExpenseFormModal()}
+      {renderSettleModal()}
     </View>
   );
 };
 
 export default Home;
 
-const styles = StyleSheet.create({
+// ─── Styles ───────────────────────────────────────────────────────────────────
+
+const s = StyleSheet.create({
   root: { flex: 1, backgroundColor: Colors.background },
   screen: { flex: 1 },
+  flex1: { flex: 1 },
 
   topBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: Spacing.lg,
-    paddingVertical: Spacing.md,
+    flexDirection: 'row', alignItems: 'center',
+    paddingHorizontal: Spacing.lg, paddingVertical: Spacing.md,
     backgroundColor: Colors.card,
-    borderBottomWidth: 1,
-    borderBottomColor: Colors.border,
-    gap: Spacing.sm,
+    borderBottomWidth: 1, borderBottomColor: Colors.border,
+    gap: Spacing.xs,
   },
-  topBarTitle: {
-    flex: 1,
-    fontSize: FontSize.lg,
-    fontWeight: '700',
-    color: Colors.text,
-  },
+  topBarTitle: { flex: 1, fontSize: FontSize.lg, fontWeight: '700', color: Colors.text },
   topBarAction: {
     backgroundColor: Colors.primary,
-    paddingHorizontal: Spacing.md,
-    paddingVertical: Spacing.xs + 2,
+    paddingHorizontal: Spacing.sm, paddingVertical: Spacing.xs + 2,
     borderRadius: BorderRadius.pill,
   },
-  topBarActionText: {
-    color: Colors.white,
-    fontWeight: '600',
-    fontSize: FontSize.sm,
-  },
-  backBtn: { paddingRight: Spacing.sm },
+  topBarActionText: { color: Colors.white, fontWeight: '600', fontSize: FontSize.xs },
+  backBtn: { paddingRight: Spacing.xs },
   backBtnText: { color: Colors.primary, fontSize: FontSize.md, fontWeight: '600' },
 
-  emptyState: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: Spacing.xl,
-  },
-  emptyTitle: {
-    fontSize: FontSize.xl,
-    fontWeight: '600',
-    color: Colors.text,
-    marginBottom: Spacing.sm,
-  },
-  emptySubtitle: {
-    fontSize: FontSize.md,
-    color: Colors.textSecondary,
-    textAlign: 'center',
-    lineHeight: 22,
-  },
+  emptyState: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: Spacing.xl },
+  emptyTitle: { fontSize: FontSize.xl, fontWeight: '600', color: Colors.text, marginBottom: Spacing.sm },
+  emptySub: { fontSize: FontSize.md, color: Colors.textSecondary, textAlign: 'center', lineHeight: 22 },
 
   groupCard: {
-    backgroundColor: Colors.card,
-    borderRadius: BorderRadius.md,
-    padding: Spacing.lg,
-    marginBottom: Spacing.md,
-    elevation: 2,
-    shadowColor: Colors.black,
-    shadowOpacity: 0.07,
-    shadowRadius: 6,
+    backgroundColor: Colors.card, borderRadius: BorderRadius.md,
+    padding: Spacing.lg, marginBottom: Spacing.md,
+    elevation: 2, shadowColor: Colors.black, shadowOpacity: 0.07, shadowRadius: 6,
     shadowOffset: { width: 0, height: 2 },
   },
-  groupCardRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: Spacing.xs,
-  },
-  groupName: {
-    fontSize: FontSize.lg,
-    fontWeight: '700',
-    color: Colors.text,
-    flex: 1,
-  },
+  groupCardRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: Spacing.xs },
+  groupName: { fontSize: FontSize.lg, fontWeight: '700', color: Colors.text, flex: 1 },
   groupArrow: { fontSize: 22, color: Colors.grey },
-  groupMeta: {
-    fontSize: FontSize.sm,
-    color: Colors.primary,
-    fontWeight: '600',
-    marginBottom: 2,
-  },
+  groupMeta: { fontSize: FontSize.sm, color: Colors.primary, fontWeight: '600', marginBottom: 2 },
   groupMemberList: { fontSize: FontSize.xs, color: Colors.textSecondary },
 
   detailContent: { padding: Spacing.lg },
 
   summaryCard: {
-    backgroundColor: Colors.primary,
-    borderRadius: BorderRadius.md,
-    padding: Spacing.lg,
-    alignItems: 'center',
-    marginBottom: Spacing.lg,
+    backgroundColor: Colors.primary, borderRadius: BorderRadius.md,
+    padding: Spacing.lg, alignItems: 'center', marginBottom: Spacing.lg,
   },
   summaryLabel: { fontSize: FontSize.sm, color: 'rgba(255,255,255,0.8)', fontWeight: '500' },
-  summaryAmount: {
-    fontSize: FontSize.xxl,
-    fontWeight: '800',
-    color: Colors.white,
-    marginVertical: Spacing.xs,
-  },
+  summaryAmount: { fontSize: FontSize.xxl, fontWeight: '800', color: Colors.white, marginVertical: Spacing.xs },
   summaryMeta: { fontSize: FontSize.xs, color: 'rgba(255,255,255,0.7)' },
 
-  sectionHeading: {
-    fontSize: FontSize.md,
-    fontWeight: '700',
-    color: Colors.text,
-    marginBottom: Spacing.sm,
-    marginTop: Spacing.sm,
+  sectionRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: Spacing.sm, marginTop: Spacing.sm },
+  sectionHeading: { fontSize: FontSize.md, fontWeight: '700', color: Colors.text },
+  settleBtn: {
+    backgroundColor: Colors.positiveGreen,
+    paddingHorizontal: Spacing.md, paddingVertical: Spacing.xs + 2,
+    borderRadius: BorderRadius.pill,
   },
+  settleBtnText: { color: Colors.white, fontSize: FontSize.xs, fontWeight: '700' },
 
   balanceCard: {
-    backgroundColor: Colors.card,
-    borderRadius: BorderRadius.md,
-    paddingHorizontal: Spacing.md,
-    marginBottom: Spacing.lg,
-    elevation: 1,
-    shadowColor: Colors.black,
-    shadowOpacity: 0.05,
-    shadowRadius: 4,
+    backgroundColor: Colors.card, borderRadius: BorderRadius.md,
+    paddingHorizontal: Spacing.md, marginBottom: Spacing.lg,
+    elevation: 1, shadowColor: Colors.black, shadowOpacity: 0.05, shadowRadius: 4,
     shadowOffset: { width: 0, height: 1 },
   },
-  noDataText: {
-    color: Colors.textSecondary,
-    fontSize: FontSize.sm,
-    textAlign: 'center',
-    paddingVertical: Spacing.lg,
-  },
+  noDataText: { color: Colors.textSecondary, fontSize: FontSize.sm, textAlign: 'center', paddingVertical: Spacing.lg },
   balanceRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    justifyContent: 'space-between',
+    flexDirection: 'row', alignItems: 'center',
     paddingVertical: Spacing.md,
-    borderBottomWidth: 1,
-    borderBottomColor: Colors.lightGrey,
+    borderBottomWidth: 1, borderBottomColor: Colors.lightGrey,
+    gap: Spacing.sm,
   },
   balanceRowLast: { borderBottomWidth: 0 },
-  balanceEmail: {
-    flex: 1,
-    fontSize: FontSize.sm,
-    color: Colors.text,
-    fontWeight: '500',
-    paddingRight: Spacing.sm,
+  balanceAvatar: {
+    width: 36, height: 36, borderRadius: 18,
+    backgroundColor: Colors.primaryMuted,
+    alignItems: 'center', justifyContent: 'center',
   },
-  balanceRight: { alignItems: 'flex-end' },
+  balanceAvatarText: { fontSize: FontSize.xs, fontWeight: '700', color: Colors.primary },
+  balanceRight: { flex: 1 },
   balanceAmount: { fontSize: FontSize.sm, fontWeight: '700' },
-  balancePositive: { color: Colors.positiveGreen },
-  balanceNegative: { color: Colors.negativeRed },
-  balanceSettled: { color: Colors.neutralGrey },
+  balPos: { color: Colors.positiveGreen },
+  balNeg: { color: Colors.negativeRed },
+  balOk: { color: Colors.neutralGrey },
   balanceSub: { fontSize: FontSize.xs, color: Colors.textSecondary, marginTop: 2 },
 
   expenseCard: {
-    backgroundColor: Colors.card,
-    borderRadius: BorderRadius.md,
-    padding: Spacing.md,
-    marginBottom: Spacing.md,
-    elevation: 1,
-    shadowColor: Colors.black,
-    shadowOpacity: 0.05,
-    shadowRadius: 4,
+    backgroundColor: Colors.card, borderRadius: BorderRadius.md,
+    padding: Spacing.md, marginBottom: Spacing.md,
+    elevation: 1, shadowColor: Colors.black, shadowOpacity: 0.05, shadowRadius: 4,
     shadowOffset: { width: 0, height: 1 },
   },
-  expenseCardTop: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    marginBottom: Spacing.xs,
-  },
-  expenseItemName: {
-    fontSize: FontSize.md,
-    fontWeight: '700',
-    color: Colors.text,
-    flex: 1,
-    paddingRight: Spacing.sm,
-  },
-  expenseTotalCost: { fontSize: FontSize.md, fontWeight: '700', color: Colors.primary },
+  expenseTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: Spacing.xs },
+  expenseName: { fontSize: FontSize.md, fontWeight: '700', color: Colors.text, flex: 1, paddingRight: Spacing.sm },
+  expenseCost: { fontSize: FontSize.md, fontWeight: '700', color: Colors.primary },
   expenseMeta: { fontSize: FontSize.xs, color: Colors.textSecondary, marginBottom: 2 },
-  expenseSplitLabel: {
-    fontSize: FontSize.xs,
-    color: Colors.secondary,
-    fontWeight: '600',
-    marginBottom: Spacing.sm,
-  },
-  sharesRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: Spacing.sm,
-    marginBottom: Spacing.sm,
-  },
+  expenseSplitLabel: { fontSize: FontSize.xs, color: Colors.secondary, fontWeight: '600', marginBottom: Spacing.sm },
+  sharesRow: { flexDirection: 'row', flexWrap: 'wrap', gap: Spacing.sm, marginBottom: Spacing.sm },
   shareChip: {
-    backgroundColor: Colors.primaryMuted,
-    borderRadius: BorderRadius.sm,
-    paddingHorizontal: Spacing.sm,
-    paddingVertical: Spacing.xs,
-    alignItems: 'center',
+    backgroundColor: Colors.primaryMuted, borderRadius: BorderRadius.sm,
+    paddingHorizontal: Spacing.sm, paddingVertical: Spacing.xs, alignItems: 'center',
   },
   shareChipEmail: { fontSize: FontSize.xs, color: Colors.primary, fontWeight: '600' },
   shareChipAmount: { fontSize: FontSize.xs, color: Colors.text },
-  expenseActions: {
-    flexDirection: 'row',
-    gap: Spacing.sm,
-    justifyContent: 'flex-end',
-  },
-  editBtn: {
-    backgroundColor: Colors.secondary,
-    paddingVertical: Spacing.xs,
-    paddingHorizontal: Spacing.md,
-    borderRadius: BorderRadius.sm,
-  },
+  expenseActions: { flexDirection: 'row', gap: Spacing.sm, justifyContent: 'flex-end' },
+  editBtn: { backgroundColor: Colors.secondary, paddingVertical: Spacing.xs, paddingHorizontal: Spacing.md, borderRadius: BorderRadius.sm },
   editBtnText: { color: Colors.white, fontSize: FontSize.xs, fontWeight: '600' },
-  deleteBtn: {
-    backgroundColor: Colors.danger,
-    paddingVertical: Spacing.xs,
-    paddingHorizontal: Spacing.md,
-    borderRadius: BorderRadius.sm,
-  },
+  deleteBtn: { backgroundColor: Colors.danger, paddingVertical: Spacing.xs, paddingHorizontal: Spacing.md, borderRadius: BorderRadius.sm },
   deleteBtnText: { color: Colors.white, fontSize: FontSize.xs, fontWeight: '600' },
 
-  overlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.45)',
-    justifyContent: 'flex-end',
-  },
+  // Modals
+  overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'flex-end' },
   overlayInner: { width: '100%' },
   modalCard: {
     backgroundColor: Colors.white,
-    borderTopLeftRadius: BorderRadius.lg,
-    borderTopRightRadius: BorderRadius.lg,
-    padding: Spacing.xl,
-    paddingBottom: 36,
+    borderTopLeftRadius: BorderRadius.lg, borderTopRightRadius: BorderRadius.lg,
+    padding: Spacing.xl, paddingBottom: 36,
   },
-  modalTitle: {
-    fontSize: FontSize.xl,
-    fontWeight: '700',
-    color: Colors.text,
-    marginBottom: Spacing.lg,
-  },
-  fieldLabel: {
-    fontSize: FontSize.sm,
-    color: Colors.textSecondary,
-    fontWeight: '500',
-    marginBottom: Spacing.xs,
-    marginTop: Spacing.sm,
-  },
+  modalTitle: { fontSize: FontSize.xl, fontWeight: '700', color: Colors.text, marginBottom: Spacing.lg },
+  fieldLabel: { fontSize: FontSize.sm, color: Colors.textSecondary, fontWeight: '500', marginBottom: Spacing.xs, marginTop: Spacing.sm },
   fieldHint: { fontSize: FontSize.xs, color: Colors.grey, marginBottom: Spacing.sm },
   textInput: {
-    borderWidth: 1,
-    borderColor: Colors.border,
-    borderRadius: BorderRadius.sm,
-    paddingVertical: Spacing.md,
-    paddingHorizontal: Spacing.md,
-    fontSize: FontSize.md,
-    color: Colors.text,
-    backgroundColor: Colors.white,
-    marginBottom: Spacing.sm,
+    borderWidth: 1, borderColor: Colors.border, borderRadius: BorderRadius.sm,
+    paddingVertical: Spacing.md, paddingHorizontal: Spacing.md,
+    fontSize: FontSize.md, color: Colors.text,
+    backgroundColor: Colors.white, marginBottom: Spacing.sm,
   },
-
+  chipsWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: Spacing.xs, marginBottom: Spacing.xs },
   memberChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    flexDirection: 'row', alignItems: 'center',
     backgroundColor: Colors.primaryMuted,
     borderRadius: BorderRadius.pill,
-    paddingHorizontal: Spacing.md,
-    paddingVertical: Spacing.xs,
-    marginBottom: Spacing.xs,
-    alignSelf: 'flex-start',
-    maxWidth: '100%',
+    paddingHorizontal: Spacing.md, paddingVertical: Spacing.xs,
   },
-  memberChipText: { color: Colors.primary, fontSize: FontSize.sm, flex: 1 },
+  memberChipText: { color: Colors.primary, fontSize: FontSize.sm },
   memberChipRemove: { color: Colors.primary, marginLeft: Spacing.sm, fontWeight: '700' },
-  memberAddRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.sm,
-    marginBottom: Spacing.sm,
-  },
-  memberEmailInput: { flex: 1, marginBottom: 0 },
-  addMemberBtn: {
-    backgroundColor: Colors.primary,
-    paddingHorizontal: Spacing.md,
-    paddingVertical: Spacing.md,
-    borderRadius: BorderRadius.sm,
-  },
-  addMemberBtnText: { color: Colors.white, fontWeight: '600', fontSize: FontSize.sm },
+  memberAddRow: { flexDirection: 'row', alignItems: 'center', gap: Spacing.sm, marginBottom: Spacing.sm },
+  addBtn: { backgroundColor: Colors.primary, paddingHorizontal: Spacing.md, paddingVertical: Spacing.md, borderRadius: BorderRadius.sm },
+  addBtnText: { color: Colors.white, fontWeight: '600', fontSize: FontSize.sm },
 
-  splitToggle: {
-    flexDirection: 'row',
-    borderRadius: BorderRadius.sm,
-    borderWidth: 1,
-    borderColor: Colors.primary,
-    overflow: 'hidden',
-    marginBottom: Spacing.md,
-    marginTop: Spacing.xs,
-  },
-  splitToggleBtn: {
-    flex: 1,
-    paddingVertical: Spacing.sm,
-    alignItems: 'center',
-    backgroundColor: Colors.white,
-  },
-  splitToggleBtnActive: { backgroundColor: Colors.primary },
-  splitToggleBtnText: { fontSize: FontSize.sm, color: Colors.primary, fontWeight: '600' },
-  splitToggleBtnTextActive: { color: Colors.white },
-  equalSplitBox: {
-    backgroundColor: Colors.primaryMuted,
-    borderRadius: BorderRadius.sm,
-    padding: Spacing.md,
-    alignItems: 'center',
-    marginBottom: Spacing.md,
-  },
-  equalSplitText: { color: Colors.primary, fontWeight: '600', fontSize: FontSize.sm },
+  // Split
+  splitToggle: { flexDirection: 'row', borderRadius: BorderRadius.sm, borderWidth: 1, borderColor: Colors.primary, overflow: 'hidden', marginBottom: Spacing.md, marginTop: Spacing.xs },
+  splitBtn: { flex: 1, paddingVertical: Spacing.sm, alignItems: 'center', backgroundColor: Colors.white },
+  splitBtnActive: { backgroundColor: Colors.primary },
+  splitBtnText: { fontSize: FontSize.sm, color: Colors.primary, fontWeight: '600' },
+  splitBtnTextActive: { color: Colors.white },
+  splitSection: { marginBottom: Spacing.md },
 
-  memberShareRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: Spacing.sm,
-    gap: Spacing.sm,
+  // Checkboxes
+  checkRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: Spacing.sm, gap: Spacing.sm },
+  checkbox: { width: 22, height: 22, borderRadius: 5, borderWidth: 2, borderColor: Colors.border, backgroundColor: Colors.white, alignItems: 'center', justifyContent: 'center' },
+  checkboxOn: { backgroundColor: Colors.primary, borderColor: Colors.primary },
+  checkTick: { color: Colors.white, fontSize: 13, fontWeight: '700' },
+  checkLabel: { flex: 1, fontSize: FontSize.sm, color: Colors.text, fontWeight: '500' },
+  checkShare: { fontSize: FontSize.sm, fontWeight: '700', color: Colors.primary },
+  warnText: { fontSize: FontSize.xs, color: Colors.danger, marginTop: Spacing.xs },
+
+  // By amount
+  shareRow: { flexDirection: 'row', alignItems: 'center', marginBottom: Spacing.sm, gap: Spacing.sm },
+  shareEmail: { flex: 1, fontSize: FontSize.sm, color: Colors.text },
+  shareInput: {
+    width: 90, borderWidth: 1, borderColor: Colors.border, borderRadius: BorderRadius.sm,
+    paddingVertical: Spacing.xs, paddingHorizontal: Spacing.sm,
+    fontSize: FontSize.sm, color: Colors.text, textAlign: 'right',
   },
-  memberShareEmail: { flex: 1, fontSize: FontSize.sm, color: Colors.text },
-  memberShareInput: {
-    width: 90,
-    borderWidth: 1,
-    borderColor: Colors.border,
-    borderRadius: BorderRadius.sm,
-    paddingVertical: Spacing.xs,
-    paddingHorizontal: Spacing.sm,
-    fontSize: FontSize.sm,
-    color: Colors.text,
-    textAlign: 'right',
+  byAmountStatus: { fontSize: FontSize.sm, fontWeight: '600', marginBottom: Spacing.md, textAlign: 'center' },
+  statusOk: { color: Colors.success },
+  statusErr: { color: Colors.danger },
+
+  // Settle Up chips
+  chipSelector: { flexDirection: 'row', flexWrap: 'wrap', gap: Spacing.sm, marginBottom: Spacing.sm },
+  selectorChip: {
+    borderWidth: 1.5, borderColor: Colors.border,
+    borderRadius: BorderRadius.pill,
+    paddingHorizontal: Spacing.md, paddingVertical: Spacing.sm,
   },
-  byAmountStatus: {
-    fontSize: FontSize.sm,
-    fontWeight: '600',
-    marginBottom: Spacing.md,
-    textAlign: 'center',
-  },
-  byAmountOk: { color: Colors.success },
-  byAmountError: { color: Colors.danger },
+  selectorChipActive: { backgroundColor: Colors.primary, borderColor: Colors.primary },
+  selectorChipText: { fontSize: FontSize.sm, fontWeight: '600', color: Colors.text },
+  selectorChipTextActive: { color: Colors.white },
 
   modalFooter: { flexDirection: 'row', gap: Spacing.md, marginTop: Spacing.lg },
-  cancelBtn: {
-    flex: 1,
-    borderWidth: 1,
-    borderColor: Colors.border,
-    borderRadius: BorderRadius.sm,
-    paddingVertical: Spacing.md,
-    alignItems: 'center',
-  },
+  cancelBtn: { flex: 1, borderWidth: 1, borderColor: Colors.border, borderRadius: BorderRadius.sm, paddingVertical: Spacing.md, alignItems: 'center' },
   cancelBtnText: { color: Colors.textSecondary, fontWeight: '600', fontSize: FontSize.md },
-  primaryBtn: {
-    flex: 1,
-    backgroundColor: Colors.primary,
-    borderRadius: BorderRadius.sm,
-    paddingVertical: Spacing.md,
-    alignItems: 'center',
-  },
+  primaryBtn: { flex: 1, backgroundColor: Colors.primary, borderRadius: BorderRadius.sm, paddingVertical: Spacing.md, alignItems: 'center' },
   primaryBtnText: { color: Colors.white, fontWeight: '700', fontSize: FontSize.md },
 });
